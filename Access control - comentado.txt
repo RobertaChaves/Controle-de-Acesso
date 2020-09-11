@@ -1,0 +1,435 @@
+//PROJETO CONTOLE DE ACESSO COM SENSOR RFID
+
+#include <EEPROM.h>     //Biblioteca para Ler e Gravar IDs na Memoria
+#include <SPI.h>       //Biblioteca para usar o protocolo SPI, Comunicar o sensor com o arduino
+#include <MFRC522.h>  //Biblioteca do Sensor RFID
+
+#define led_vermelho 7    //Define pin dos leds
+#define led_verde 6
+#define led_amarelo 5
+
+#define rele 4        //Define pin do rele
+#define botao 3      //Define pin do botao
+
+boolean partida = false;    // Variavel utilizada na função para checar bytes
+boolean programa = false;  //Incializa o programa como falso
+
+uint8_t sucessoLer;      //Variavel inteira para caso tenha uma leitura bem sucedida do leitor RFID
+
+byte armazenacartao[4];    // Armazena um id lido na Memoria
+byte lercartao[4];        // Le o id dos cartoes armazenados na Memoria
+byte cartaomestre[4];    // Armazena o id do cartao mastre na Memoria
+
+// Cria instancia MFRC522.
+#define SS_PIN 10
+#define RST_PIN 9
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+// -------------------------   Configuracoes  -------------------------
+void setup() {
+
+  //Configuracao dos pin do arduino
+  pinMode(led_vermelho, OUTPUT);
+  pinMode(led_verde, OUTPUT);
+  pinMode(led_amarelo, OUTPUT);
+  pinMode(botao, INPUT_PULLUP);   // Habilita o resistor pull up
+  pinMode(rele, OUTPUT);
+
+  //Estão todos OFF
+  digitalWrite(rele, LOW);
+  digitalWrite(led_vermelho, LOW);
+  digitalWrite(led_verde, LOW);
+  digitalWrite(led_amarelo, LOW);
+
+  //Configuracoes iniciais
+  Serial.begin(9600);     // Inicializa a comunicacao serial com o PC, definindo a taxa de transferencia em 9600 bits
+  SPI.begin();           // MFRC522 Hardware usa o protocolo SPI
+  mfrc522.PCD_Init();   // Inicializae MFRC522 Hardware
+
+  
+  verificarSensor();    // Chama a função que veriifica se o sensor RFID está funcionando
+
+  //Se o botão for pressionado inicia o reset
+  if (digitalRead(botao) == LOW) {
+    digitalWrite(led_vermelho, HIGH);                                //Liga LED verdemelho
+    Serial.println(F("O botao de reset foi pressionado"));
+    Serial.println(F("Voce tem 5 segundos para cancelar o reset"));
+    Serial.println(F("Isto removera todos os registros e nao podera ser revertido"));
+    bool estadoBotao = monitoraBotao(5000);                      //Tempo para o usuario cancelar o reset
+    if (estadoBotao == true && digitalRead(botao) == LOW) {     //Se o botao ainda estiver pressionado, reset a memoria
+      Serial.println(F("Iniciando o reset"));
+      //
+      for (uint16_t x = 0; x < EEPROM.length(); x = x + 1) { //Loop até o fim dos endereços da memoria
+        if (EEPROM.read(x) == 0) {                          //Se o endereco da memoria for 0, nao faça nada e va para o proximo endereço
+        }
+        else {
+          EEPROM.write(x, 0);                           //Se nao, escreva 0 para limpar a memoria
+        }
+      }
+      Serial.println(F("Memoria Resetada com Sucesso"));
+    }
+    else {
+      Serial.println(F("O reset foi cancelado"));  //Feedback para informar que o reset foi cancelado pelo serial e atraves de led
+      digitalWrite(led_vermelho, LOW);
+    }
+  }
+  // Procura por um ID MESTRE, se ainda nao foi definido da a oportunidade ao usuario de definir
+  if (EEPROM.read(1) != 143) {
+    Serial.println(F("Cartao RFID Mestre ainda nao foi definido"));
+    Serial.println(F("Procurando por um cartão para ser definido como cartao mestre..."));
+    do {
+      sucessoLer = pegaID();              //Define que a leitura foi bem sucessida para 1, se nao a deixa em 0
+      digitalWrite(led_amarelo, HIGH);   //Mostra no LED que o cartao mestre ainda precisa ser definido
+      delay(200);                       //Pisca 2 vezes
+      digitalWrite(led_amarelo, LOW);
+      delay(200);
+    }
+    while (!sucessoLer);  // Enquanto o cartao mestre nao for lido com sucesso o programa nao vai continuar
+
+    for ( uint8_t j = 0; j < 4; j++ ) {        //Loop 4 vezes
+      EEPROM.write( 2 + j, lercartao[j] );    //Escreve o ID scaneado na memoria, comecando do endereco 3
+    }
+    EEPROM.write(1, 143);                  //Escreve na Memoria definindo o cartao mestre
+    Serial.println(F("Cartao Mestre foi definido com sucesso!"));
+  }
+
+  // Mostra o ID do cartão mestre, para fins de depuração
+  // Serial.println("-----------------------------------------------------");
+  // Serial.println(F("Cartão Mestre:"));
+  for ( uint8_t i = 0; i < 4; i++ ) {          //Le o ID do cartao mestre
+    cartaomestre[i] = EEPROM.read(2 + i);     //Escreve o ID do cartao mestre
+  //   Serial.print(cartaomestre[i], HEX);
+  }
+  Serial.println("");
+  Serial.println("-----------------------------------------------------");
+  Serial.println(F("Bem-vindo ao Sistema de Controle de Acesso."));
+  Serial.println(F("Tudo esta pronto!"));
+  Serial.println(F("Procurando Cartões para serem lidos..."));
+  Serial.println("-----------------------------------------------------");
+}
+
+// ------------------------- Funcao Main -------------------------
+void loop () {
+  do {
+    sucessoLer = pegaID();
+    if (digitalRead(botao) == LOW) {                                       //Se o butao for pressionado por 5 segundos acontecerá o reset
+      digitalWrite(led_vermelho, HIGH);
+      Serial.println(F("O botao de reset foi pressionado"));
+      Serial.println(F("O cartao mestre sera apagado! Em 5 segundos"));
+      bool estadoBotao = monitoraBotao(5000);                          //Tempo para cancelar o reset
+      if (estadoBotao == true && digitalRead(botao) == LOW) {         //Se o botao estiver pressionado, reseta
+        EEPROM.write(1, 0);                                          //Escreve na memoria do arduino
+        digitalWrite(led_vermelho, LOW);
+        Serial.println(F("O cartao mestre foi apagado do dispositivo"));
+        digitalWrite(led_verde, HIGH);
+        delay(3000);
+        digitalWrite(led_verde, LOW);
+        Serial.println("  ");
+        Serial.println(F("Por favor, reinicie para reprogramar um cartao mestre"));
+        while (1);
+      }
+      Serial.println("-----------------------------------------------------");
+      Serial.println(F("O reset do cartao mestre foi cancelado"));
+    }
+    if (programa) {
+      ledprograma();           //Define os leds para o modo programa, ou seja todos acessos
+    }
+    else {
+      lednormal();          //Define os leds para o modo normal, ou seja todos apagados
+    }
+  }
+  while (!sucessoLer);   //Enquanto o cartao nao for lido com sucesso o programa nao vai continuar
+
+  if (programa) {
+    if ( eMestre(lercartao) ) {                //Verifica se o cartao mestre foi lido, se sim finaliza
+      Serial.println(F("Cartao Mestre foi lido"));
+      Serial.println(F("Saindo do modo programador"));
+      Serial.println("-----------------------------------------------------");
+      programa = false;
+      return;
+    }
+    else {
+      if ( encontrarID(lercartao) ) {   //Se o cartao ja foi adicionado ao banco de dados, exclua-o
+        Serial.println(F("Eu conheço este Cartão, removendo-o..."));
+        apagarID(lercartao);
+        Serial.println("-----------------------------------------------------");
+        Serial.println(F("Procurando Cartão para adicionar ou remover..."));
+      }
+      else {                     //Se o cartao ainda nao foi adicionado, adicione-o a lista
+        Serial.println(F("Eu não conheço este cartão, adicionando-o..."));
+        gravarID(lercartao);
+        Serial.println("-----------------------------------------------------");
+        Serial.println(F("Procurando Cartão para adicionar ou remover..."));
+      }
+    }
+  }
+  else {
+    if ( eMestre(lercartao)) {            //Se o cartao lido for correspondente ao cartao mestre, entra no modo programador
+      programa = true;
+      Serial.println(F("Ola Mestre - Entrando no modo de programador"));
+      uint8_t count = EEPROM.read(0);  //Le o primeiro Byte da memoria
+      //Serial.print(F("Eu tenho "));   //Diz quantos ID's tem na memoria
+      // Serial.print(count);
+      //Serial.print(F(" gravado(s) na Memoria"));
+      // Serial.println("");
+      Serial.println("");
+      Serial.println(F("Procurando Cartão para adicionar ou remover..."));
+      Serial.println("");
+      Serial.println(F("Passe o cartao mestre novamente para sair do modo de programador"));
+      Serial.println("-----------------------------------------------------");
+    }
+    else {
+      if ( encontrarID(lercartao) ) {             //Procura pelo ID na memoria
+        Serial.println(F("Bem vindo, você esta autorizado a passar"));
+        Serial.println("-----------------------------------------------------");
+        autorizado(300);                      //Abre a trava por 300 ms
+      }
+      else {                               //Se nao, mostre que o ID nao era um ID valido
+        Serial.println(F("Voce nao esta autorizado a passar"));
+        Serial.println("-----------------------------------------------------");
+        negado();
+      }
+    }
+  }
+}
+
+// -------------------------   Acesso Concedido  -------------------------
+void autorizado ( uint16_t setDelay) {
+  digitalWrite(led_verde, HIGH);  // Liga LED verde
+  digitalWrite(rele, HIGH);      // Abre a trava  ativando o rele
+  delay(setDelay);              // Deixa a trava aberta por alguns segundo
+  digitalWrite(rele, LOW);     // Fecha a trava solenoide
+
+}
+
+// -------------------------  Acesso Negado  -------------------------
+void negado() {
+  digitalWrite(led_vermelho, HIGH);  // Liga LED vermelho
+  delay(1000);
+}
+
+
+// ------------------------- Obter o ID de um Cartão  -------------------------
+uint8_t pegaID() {
+  // Preparando-se para ler Cartão
+  if ( ! mfrc522.PICC_IsNewCardPresent()) {    //Se um novo Cartão for colocado no leitor RFID continue
+    return 0;
+  }
+  if ( ! mfrc522.PICC_ReadCardSerial()) {   //Se o novo cartão possuir um Serial continue
+    return 0;
+  }
+  Serial.println(F("Scanneando ID do Cartão...")); //Scaneando Cartão
+  for ( uint8_t i = 0; i < 4; i++) {  //
+    lercartao[i] = mfrc522.uid.uidByte[i];
+    //Serial.print(lercartao[i], HEX);  //Mostra o ID do cartão lido [DEPURAÇÃO]
+  }
+  Serial.println("");
+  mfrc522.PICC_HaltA();   //Para de ler
+  return 1;
+}
+
+// ------------------------- Mostra detalhe do Sensor -------------------------
+void verificarSensor() {
+  //Obtem a versão do software MFRC522
+  byte v = mfrc522.PCD_ReadRegister(mfrc522.VersionReg);
+  // Quando 0x00 ou 0xFF é retornado, a comunicação provavelmente falhou
+  if ((v == 0x00) || (v == 0xFF)) {
+    Serial.println(F("AVISO: Falha de comunicação, o MFRC522 está conectado corretamente?"));
+    Serial.println(F("SISTEMA INTERROMPIDO: Verifique as conexões."));
+    //Led Vermelho pisca 3 vezes
+    digitalWrite(led_vermelho, HIGH); 
+    delay(200);
+    digitalWrite(led_vermelho, LOW); 
+    delay(200);
+    digitalWrite(led_vermelho, HIGH); 
+    delay(200);
+    digitalWrite(led_vermelho, LOW); 
+    delay(200);
+    digitalWrite(led_vermelho, HIGH); 
+    delay(200);
+    while (true); // não vá mais longe
+  }
+}
+
+// ------------------------- Modo de Programação -------------------------
+//Todos os led acessos
+void ledprograma() {
+  digitalWrite(led_vermelho, HIGH);
+  digitalWrite(led_verde, HIGH);
+  digitalWrite(led_amarelo, HIGH);
+  delay(200);
+}
+
+// ------------------------- Modo Normal  -------------------------
+//Todos os Leds apagados e Rele desativado
+void lednormal () {
+  digitalWrite(led_amarelo, LOW);
+  digitalWrite(led_vermelho, LOW);
+  digitalWrite(led_verde, LOW);
+  digitalWrite(rele, LOW);
+}
+
+// ------------------------- Ler um ID da Memoria  -------------------------
+void lerID( uint8_t numero ) {
+  uint8_t start = (numero * 4 ) + 2;              // Descobre a posição inicial
+  for ( uint8_t i = 0; i < 4; i++ ) {            // Loop 4 vezes para obter os 4 bytes
+    armazenacartao[i] = EEPROM.read(start + i); // Atribui valores lidos da memoria para o vetor armazenacartao
+  }
+}
+
+// ------------------------- Adicionar um ID à Memoria -------------------------
+void gravarID( byte a[] ) {
+  if ( !encontrarID( a ) ) {                  //Antes de escrever na memoria, verifica se esse ID já foi cadastrado antes
+    uint8_t num = EEPROM.read(0);            //Obtem o número de espaços usados, a posição 0 armazena o número de IDs
+    uint8_t start = ( num * 4 ) + 6;        //Descubre onde o próximo slot começa
+    num++;                                 //Incrementa mais um ao contador
+    EEPROM.write( 0, num );               //Escreve a nova contagem para o contador
+    for ( uint8_t j = 0; j < 4; j++ ) {  //Loop 4 vezes
+      EEPROM.write( start + j, a[j] );  //Escreve os valores da matriz na posição correta da memoria
+    }
+    sucessoGravar();
+    Serial.println(F("Registro de ID adicionado com sucesso à Memoria"));
+  }
+  else {
+    falhaGravar();
+    Serial.println(F("FALHA! Há algo errado com ID ou a Memoria está ruim"));
+  }
+}
+
+// -------------------------  Remover ID da Memoria -------------------------
+void apagarID( byte a[] ) {
+  if ( !encontrarID( a ) ) {      // Antes de excluir um ID, verifica se está cadastrado mesmo
+    falhaGravar();               // Se não está, aponta falha
+    Serial.println(F("FALHA! Há algo errado com ID ou a Mmemoria está ruim"));
+  }
+  else {
+    uint8_t num = EEPROM.read(0);         //Obtem o número de espaços usados, a posição 0 armazena o número de cartões de identificação
+    uint8_t slot;                        //Descobrir o número do slot do cartão
+    uint8_t start;                      //= ( num * 4 ) + 6; // Descobre onde o próximo slot começa
+    uint8_t looping;                   //O número de vezes que o loop é repetido
+    uint8_t j;
+    uint8_t count = EEPROM.read(0);  //Le primeiro Byte da Memoria,que armazena o número de cartões
+    slot = encontrarIDSLOT( a );    //Descobre o número do slot do cartão para excluir
+    start = (slot * 4) + 2;
+    looping = ((num - slot) * 4);
+    num--;                       // Decrementa menos um do contador
+    EEPROM.write( 0, num );     // Escreve a nova contagem do contador
+    for ( j = 0; j < looping; j++ ) {                            //Loop tempo de troca de cartão
+      EEPROM.write( start + j, EEPROM.read(start + 4 + j));     // Muda os valores da matriz para 4 lugares antes na Memoria
+    }
+    for ( uint8_t k = 0; k < 4; k++ ) {                       // Loop de mudança
+      EEPROM.write( start + j + k, 0);
+    }
+    sucessoApagar();
+    Serial.println(F("Registro de ID removido com sucesso da Memoria"));
+  }
+}
+
+// -------------------------  Verificar Bytes  -------------------------
+boolean verificarBytes ( byte a[], byte b[] ) {
+  if ( a[0] != 0 )                        //Certifica de que há algo no array primeiro
+    partida = true;                      //Se existe dados no array partida recebe verdadeiro
+  for ( uint8_t k = 0; k < 4; k++ ) {   //Loop 4 veses, pois os primeiros endereços são do cartão mestre
+    if ( a[k] != b[k] )                //Se a! = B, em seguida, defina a partida como falso
+      partida = false;
+  }
+  if ( partida ) {                  //Verifica se a correspondência ainda é verdadeira
+    return true;                   //Retorna verdadeiro
+  }
+  else  {
+    return false;               //Se não, retorna falso
+  }
+}
+
+// -------------------------  Encontre o Slot  -------------------------
+uint8_t encontrarIDSLOT( byte find[] ) {
+  uint8_t count = EEPROM.read(0);                        //Le o primeiro byte da Memoria
+  for ( uint8_t i = 1; i <= count; i++ ) {              //Loop uma vez para cada entrada da memoria
+    lerID(i);                                          //Lê uma ID da memoria, ele esta armazenado no armazenacartao[4]
+    if ( verificarBytes( find, armazenacartao ) ) {   //Verifica se ID está na memoria para ser lido
+      //Verifica se é o mesmo ID lido
+      return i;                                     //Retorna o número do slot do cartão
+      break;                                       //Para, pois encontrou o slot
+    }
+  }
+}
+
+// ------------------------- Encontre o ID na Memoria  -------------------------
+boolean encontrarID( byte find[] ) {
+  uint8_t count = EEPROM.read(0);                          //Le o primeiro Byte da Memoria
+  for ( uint8_t i = 1; i < count; i++ ) {                 //Loop para cada entrada da Memoria
+    lerID(i);                                            //Le um ID da Memoria, ela é armazenada no armazenacartao[4]
+    if ( verificarBytes( find, armazenacartao ) ) {     //Verifica se o cartão armazenado leu a partir da memoria
+      return true;
+      break;                                          //Para, pois encontrou o ID
+    }
+    else {                                          //Se não, retorna falso
+    }
+  }
+  return false;
+}
+
+// ------------------------- Sucesso na gravação na Memoria  -------------------------
+// Pisca o LED verde 3 vezes para indicar uma gravação bem-sucedida na memoria
+void sucessoGravar() {
+  digitalWrite(led_verde, HIGH);         
+  delay(200);
+  digitalWrite(led_verde, LOW);        
+  delay(200);
+  digitalWrite(led_verde, HIGH);    
+  delay(200);
+  digitalWrite(led_verde, LOW);    
+  delay(200);
+  digitalWrite(led_verde, HIGH); 
+  delay(200);
+}
+
+// -------------------------  Falha na gravação na Memoria -------------------------
+//Pisca o LED vermelho 3 vezes para indicar uma falha na gravação na memoria
+void falhaGravar() {
+  digitalWrite(led_vermelho, HIGH);          
+  delay(200);
+  digitalWrite(led_vermelho, LOW);         
+  delay(200);
+  digitalWrite(led_vermelho, HIGH);    
+  delay(200);
+  digitalWrite(led_vermelho, LOW);     
+  delay(200);
+  digitalWrite(led_vermelho, HIGH);  
+  delay(200);
+}
+
+// -------------------------  Sucesso para remover ID da Memoria -------------------------
+// Pisca o LED Amarelo 3 vezes para indicar o sucesso em excluir o ID da memoria
+void sucessoApagar() {
+  digitalWrite(led_amarelo, HIGH);         
+  delay(200);
+  digitalWrite(led_amarelo, LOW);        
+  delay(200);
+  digitalWrite(led_amarelo, HIGH);   
+  delay(200);
+  digitalWrite(led_amarelo, LOW);   
+  delay(200);
+  digitalWrite(led_amarelo, HIGH); 
+  delay(200);
+}
+
+// ------------------------- Verificar se o cartão de leitura é o Cartão Mestre -------------------------
+// Verifique se o ID passado é o Cartão Mestre
+boolean eMestre( byte teste[] ) {
+  if ( verificarBytes(teste, cartaomestre) )
+    return true;
+  else
+    return false;
+}
+
+bool monitoraBotao(uint32_t intervalo) {
+  uint32_t momento = (uint32_t)millis();
+  while ((uint32_t)millis() - momento < intervalo)  {
+    if (((uint32_t)millis() % 500) == 0) { // verifique a cada meio segundo
+      if (digitalRead(botao) != LOW)
+        return false;
+    }
+  }
+  return true;
+}
